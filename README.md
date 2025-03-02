@@ -1,5 +1,7 @@
 # edarehoquqy-crawler
 
+![programming with claude](./assets/claude_programming.png)
+
 A Simple Crawler for edarehoquqy.eadl.ir - a legal opinions database.
 
 ## Project Description
