@@ -1,0 +1,12 @@
+[project]
+name = "edarehoquqy-crawler"
+version = "0.1.0"
+description = "A Simple Crawler for edarehoquqy.eadl.ir"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.13.3",
+    "httpx>=0.28.1",
+    "pydantic-settings>=2.8.1",
+    "pydantic>=2.10.6",
+]
