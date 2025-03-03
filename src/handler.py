@@ -217,6 +217,9 @@ class FileProcessor:
 
 class LegalOpinionsCrawler(AsyncCrawlerClient):
     """Crawler for legal opinions from edarehoquqy.eadl.ir"""
+    def __init__(self, file_processor: FileProcessor, timeout: int = 15):
+        super().__init__(timeout, file_processor)    
+
     async def search(self, params: CustomSearchParams) -> Optional[SearchResponse]:
         """
         Perform a search using the given parameters
@@ -233,7 +236,7 @@ class LegalOpinionsCrawler(AsyncCrawlerClient):
 
         # Check if we already have this page saved
         params_dict = params.model_dump()
-        file_path = self.get_saved_file_path(params_dict["pageIndex"], params_dict)
+        file_path = await self.get_saved_file_path(params_dict["pageIndex"], params_dict)
 
         if file_path and file_path.exists():
             logger.info(f"Found saved results for page {params_dict['pageIndex']}, loading from file")
@@ -250,7 +253,7 @@ class LegalOpinionsCrawler(AsyncCrawlerClient):
 
             # Save the raw JSON response to a file
             response_data = response.json()
-            self.save_results_to_json(
+            await self.save_results_to_json(
                 response_data,
                 params_dict["pageIndex"],
                 params_dict
@@ -270,7 +273,7 @@ class LegalOpinionsCrawler(AsyncCrawlerClient):
             logger.error(f"Search request failed: {e}")
             return None
 
-    def crawl_all_results(
+    async def crawl_all_results(
         self,
         search_text: str = "",
         page_size: int = 10,
@@ -294,7 +297,7 @@ class LegalOpinionsCrawler(AsyncCrawlerClient):
         all_results = []
         current_page = 1
         has_more = True
-        last_saved_page = self.find_last_saved_page(search_text, page_size, sort_option, from_date, to_date)
+        last_saved_page = await self.find_last_saved_page(search_text, page_size, sort_option, from_date, to_date)
 
         if last_saved_page > 0:
             logger.info(f"Found previously saved results up to page {last_saved_page}")
@@ -310,9 +313,9 @@ class LegalOpinionsCrawler(AsyncCrawlerClient):
                 toDate=to_date,
             )
 
-            file_path = self.get_saved_file_path(current_page, params.model_dump())
+            file_path = await self.get_saved_file_path(current_page, params.model_dump())
             if file_path and file_path.exists():
-                search_response = self.load_saved_search_response(file_path)
+                search_response = await self.load_saved_search_response(file_path)
                 if search_response:
                     all_results.extend(search_response.results)
                     has_more = search_response.more
@@ -321,7 +324,7 @@ class LegalOpinionsCrawler(AsyncCrawlerClient):
 
         # Initialize the session before starting new requests
         if has_more and not self.verification_token:
-            if not self.initialize_session():
+            if not await self.initialize_session():
                 logger.error("Failed to initialize session, aborting crawl")
                 return all_results
 
@@ -337,7 +340,7 @@ class LegalOpinionsCrawler(AsyncCrawlerClient):
                 toDate=to_date,
             )
 
-            search_response = self.search(params)
+            search_response = await self.search(params)
 
             if not search_response:
                 logger.error(
@@ -357,7 +360,7 @@ class LegalOpinionsCrawler(AsyncCrawlerClient):
         logger.info(f"Crawling completed, collected {len(all_results)} total results")
         return all_results
 
-    def find_last_saved_page(
+    async def find_last_saved_page(
         self,
         search_text: str = "",
         page_size: int = 10,
@@ -388,12 +391,12 @@ class LegalOpinionsCrawler(AsyncCrawlerClient):
 
         # Find all matching files
         last_page = 0
-        output_dir = Path(project_configs.OUTPUT_PATH)
+        output_dir = AsyncPath(project_configs.OUTPUT_PATH)
 
-        if not output_dir.exists():
+        if not await output_dir.exists():
             return 0
 
-        for file_path in output_dir.glob(f"{pattern}*.json"):
+        for file_path in await output_dir.glob(f"{pattern}*.json"):
             try:
                 # Extract page number from filename
                 filename = file_path.name
