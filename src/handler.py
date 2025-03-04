@@ -1,10 +1,11 @@
-import httpx
+from httpx import RequestError, HTTPStatusError, AsyncClient
 from bs4 import BeautifulSoup
+from aiopath import AsyncPath
 import logging
 import json
-import os
+import aiofiles
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 from pydantic import ValidationError
 from src._core.schemas import CustomSearchParams, SearchResponse
 from src._core import project_configs
@@ -13,18 +14,26 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class LegalOpinionsCrawler:
-    """Crawler for legal opinions from edarehoquqy.eadl.ir"""
-
-    BASE_URL = "https://edarehoquqy.eadl.ir"
-    SEARCH_PAGE_URL = f"{BASE_URL}/%D8%AC%D8%B3%D8%AA%D8%AC%D9%88%DB%8C-%D9%86%D8%B8%D8%B1%DB%8C%D8%A7%D8%AA-%D9%85%D8%B4%D9%88%D8%B1%D8%AA%DB%8C/%D8%AC%D8%B3%D8%AA%D8%AC%D9%88%DB%8C-%D9%86%D8%B8%D8%B1%DB%8C%D9%87"
-    SEARCH_API_URL = f"{BASE_URL}/API/Mvc/IdeaProject.IdeaSearch/CustomSearch/Search"
-
-    def __init__(self):
-        self.client = httpx.Client(follow_redirects=True)
+class AsyncCrawlerClient:
+    def __init__(self, timeout: int = 15):
+        self.client = AsyncClient(follow_redirects=True, timeout=timeout)
         self.verification_token = None
-        self.cookies = {}
-        self.headers = {
+        self._base_url: str = None
+        self._headers = {}
+        self._cookies = {}
+
+    @property
+    def cookies(self):
+        return self._cookies
+
+    @cookies.setter
+    def cookies(self, cookie: Dict[str, str]) -> None:
+        self._cookies.update(cookie)
+        return None
+
+    @property
+    def headers(self):
+        self._headers.update({ 
             "accept": "*/*",
             "accept-language": "en-US,en;q=0.9",
             "moduleid": "1286",
@@ -38,14 +47,36 @@ class LegalOpinionsCrawler:
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-origin",
             "tabid": "495",
-        }
+        })
+        return self._headers
 
-    def __del__(self):
-        """Close the client when the object is destroyed"""
-        if hasattr(self, "client") and self.client:
-            self.client.close()
+    @headers.setter
+    def headers(self, headers: Dict[str, str]) -> None:
+        self._headers.update(headers)
+        return None
 
-    def initialize_session(self) -> bool:
+
+    @property
+    def BASE_URL(self) -> str:
+        return self._base_url
+
+    @BASE_URL.setter
+    def base_url(self, 
+    mode: Literal["nazarat_mashvari", "normal_search"]
+    ) -> str:
+        return "https://edarehoquqy.eadl.ir/%D8%AC%D8%B3%D8%AA%D8%AC%D9%88%DB%8C-%D9%86%D8%B8%D8%B1%DB%8C%D8%A7%D8%AA-%D9%85%D8%B4%D9%88%D8%B1%D8%AA%DB%8C/%D8%AC%D8%B3%D8%AA%D8%AC%D9%88%DB%8C-%D9%86%D8%B8%D8%B1%DB%8C%D9%87" if mode == "nazarat_mashvari" else "https://edarehoquqy.eadl.ir"
+
+
+    @property
+    def SEARCH_PAGE_URL(self) -> str:
+        return f"{self.BASE_URL}/%D8%AC%D8%B3%D8%AA%D8%AC%D9%88%DB%8C-%D9%86%D8%B8%D8%B1%DB%8C%D8%A7%D8%AA-%D9%85%D8%B4%D9%88%D8%B1%D8%AA%DB%8C/%D8%AC%D8%B3%D8%AA%D8%AC%D9%88%DB%8C-%D9%86%D8%B8%D8%B1%DB%8C%D9%87"
+    
+    @property
+    def SEARCH_API_URL(self) -> str:
+        return f"{self.BASE_URL}/API/Mvc/IdeaProject.IdeaSearch/CustomSearch/Search"
+
+    
+    async def initialize_session(self) -> bool:
         """
         Initialize the session by visiting the search page and obtaining the verification token
 
@@ -53,7 +84,7 @@ class LegalOpinionsCrawler:
             bool: True if successfully initialized, False otherwise
         """
         try:
-            response = self.client.get(self.SEARCH_PAGE_URL)
+            response = await self.client.get(self.SEARCH_PAGE_URL)
             response.raise_for_status()
 
             # Parse the page to get the verification token
@@ -64,24 +95,35 @@ class LegalOpinionsCrawler:
                 logger.error("Verification token not found in the page")
                 return False
 
+            # Add coockies via it's setter 
             self.verification_token = token_input.get("value")
             self.cookies = {k: v for k, v in self.client.cookies.items()}
 
             # Add the token to the headers
-            self.headers["requestverificationtoken"] = self.verification_token
-            self.headers["referer"] = self.SEARCH_PAGE_URL
+            self.headers = {
+                "requestverificationtoken": self.verification_token,
+                "referer": self.SEARCH_PAGE_URL,
+            }
 
             logger.info(
                 f"Session initialized successfully with token: {self.verification_token[:10]}..."
             )
             return True
 
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        except (RequestError, HTTPStatusError) as e:
             logger.error(f"Failed to initialize session: {e}")
             return False
 
-    def save_results_to_json(
-        self, data: Dict[str, Any], page_number: int, params: Dict[str, Any]
+    def __del__(self):
+        """Close the client when the object is destroyed"""
+        if hasattr(self, "client") and self.client:
+            self.client.close()
+
+
+class FileProcessor:
+    @classmethod
+    async def save_results_to_json(
+        cls, data: Dict[str, Any], page_number: int, params: Dict[str, Any]
     ) -> Optional[str]:
         """
         Save the results to a JSON file
@@ -98,19 +140,11 @@ class LegalOpinionsCrawler:
             logger.warning("OUTPUT_PATH is not configured. Results not saved to file.")
             return None
 
-        # Create a filename with search parameters
-        search_term = params.get("search", "")
-        search_term_part = f"_{search_term}" if search_term else ""
-        from_date = params.get("fromDate", "")
-        to_date = params.get("toDate", "")
-        date_part = f"_{from_date}_to_{to_date}" if from_date or to_date else ""
-
-        filename = f"legal_opinions{search_term_part}{date_part}_page{page_number}.json"
-        file_path = Path(project_configs.OUTPUT_PATH) / filename
-
+        file_path = await cls._build_file_path(page_number, params)
+        
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
+            async with aiofiles.open(str(file_path), "w", encoding="utf-8") as f:
+                await f.write(json.dumps(data, ensure_ascii=False, indent=4))
 
             logger.info(f"Saved results to {file_path}")
             return str(file_path)
@@ -118,7 +152,8 @@ class LegalOpinionsCrawler:
             logger.error(f"Failed to save results to file: {e}")
             return None
 
-    def get_saved_file_path(self, page_number: int, params: Dict[str, Any]) -> Optional[Path]:
+    @classmethod
+    async def get_saved_file_path(cls, page_number: int, params: Dict[str, Any]) -> Optional[AsyncPath]:
         """
         Get the file path for a saved page
 
@@ -127,21 +162,15 @@ class LegalOpinionsCrawler:
             params: The search parameters used
 
         Returns:
-            Optional[Path]: The path to the saved file or None if OUTPUT_PATH is not configured
+            Optional[AsyncPath]: The path to the saved file or None if OUTPUT_PATH is not configured
         """
         if not project_configs.OUTPUT_PATH:
             return None
 
-        search_term = params.get("search", "")
-        search_term_part = f"_{search_term}" if search_term else ""
-        from_date = params.get("fromDate", "")
-        to_date = params.get("toDate", "")
-        date_part = f"_{from_date}_to_{to_date}" if from_date or to_date else ""
+        return await cls._build_file_path(page_number, params)
 
-        filename = f"legal_opinions{search_term_part}{date_part}_page{page_number}.json"
-        return Path(project_configs.OUTPUT_PATH) / filename
-
-    def load_saved_search_response(self, file_path: Path) -> Optional[SearchResponse]:
+    @classmethod
+    async def load_saved_search_response(cls, file_path: AsyncPath) -> Optional[SearchResponse]:
         """
         Load a saved search response from a file
 
@@ -152,19 +181,46 @@ class LegalOpinionsCrawler:
             Optional[SearchResponse]: The loaded search response or None if loading fails
         """
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            async with aiofiles.open(str(file_path), "r", encoding="utf-8") as f:
+                data = json.loads(await f.read())
 
-            try:
-                return SearchResponse.model_validate(data)
-            except ValidationError as e:
-                logger.error(f"Failed to parse saved search response: {e}")
-                return None
+            return SearchResponse.model_validate(data)
+        except ValidationError as e:
+            logger.error(f"Failed to parse saved search response: {e}")
+            return None
         except Exception as e:
             logger.error(f"Failed to load saved search response: {e}")
             return None
 
-    def search(self, params: CustomSearchParams) -> Optional[SearchResponse]:
+    @classmethod
+    async def _build_file_path(cls, page_number: int, params: Dict[str, Any]) -> AsyncPath:
+        """
+        Build the file path based on search parameters
+
+        Args:
+            page_number: The page number
+            params: The search parameters used
+
+        Returns:
+            AsyncPath: The constructed file path
+        """
+        search_term = params.get("search", "")
+        search_term_part = f"_{search_term}" if search_term else ""
+        
+        from_date = params.get("fromDate", "")
+        to_date = params.get("toDate", "")
+        date_part = f"_{from_date}_to_{to_date}" if from_date or to_date else ""
+
+        filename = f"legal_opinions{search_term_part}{date_part}_page{page_number}.json"
+        return AsyncPath(project_configs.OUTPUT_PATH) / filename
+
+
+class LegalOpinionsCrawler(AsyncCrawlerClient):
+    """Crawler for legal opinions from edarehoquqy.eadl.ir"""
+    def __init__(self, file_processor: FileProcessor, timeout: int = 15):
+        super().__init__(timeout, file_processor)    
+
+    async def search(self, params: CustomSearchParams) -> Optional[SearchResponse]:
         """
         Perform a search using the given parameters
 
@@ -180,14 +236,14 @@ class LegalOpinionsCrawler:
 
         # Check if we already have this page saved
         params_dict = params.model_dump()
-        file_path = self.get_saved_file_path(params_dict["pageIndex"], params_dict)
+        file_path = await self.get_saved_file_path(params_dict["pageIndex"], params_dict)
 
         if file_path and file_path.exists():
             logger.info(f"Found saved results for page {params_dict['pageIndex']}, loading from file")
             return self.load_saved_search_response(file_path)
 
         try:
-            response = self.client.get(
+            response = await self.client.get(
                 self.SEARCH_API_URL,
                 params=params_dict,
                 headers=self.headers,
@@ -197,7 +253,7 @@ class LegalOpinionsCrawler:
 
             # Save the raw JSON response to a file
             response_data = response.json()
-            self.save_results_to_json(
+            await self.save_results_to_json(
                 response_data,
                 params_dict["pageIndex"],
                 params_dict
@@ -213,11 +269,11 @@ class LegalOpinionsCrawler:
                 logger.error(f"Failed to parse search response: {e}")
                 return None
 
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        except (RequestError, HTTPStatusError) as e:
             logger.error(f"Search request failed: {e}")
             return None
 
-    def crawl_all_results(
+    async def crawl_all_results(
         self,
         search_text: str = "",
         page_size: int = 10,
@@ -241,7 +297,7 @@ class LegalOpinionsCrawler:
         all_results = []
         current_page = 1
         has_more = True
-        last_saved_page = self.find_last_saved_page(search_text, page_size, sort_option, from_date, to_date)
+        last_saved_page = await self.find_last_saved_page(search_text, page_size, sort_option, from_date, to_date)
 
         if last_saved_page > 0:
             logger.info(f"Found previously saved results up to page {last_saved_page}")
@@ -257,9 +313,9 @@ class LegalOpinionsCrawler:
                 toDate=to_date,
             )
 
-            file_path = self.get_saved_file_path(current_page, params.model_dump())
+            file_path = await self.get_saved_file_path(current_page, params.model_dump())
             if file_path and file_path.exists():
-                search_response = self.load_saved_search_response(file_path)
+                search_response = await self.load_saved_search_response(file_path)
                 if search_response:
                     all_results.extend(search_response.results)
                     has_more = search_response.more
@@ -268,7 +324,7 @@ class LegalOpinionsCrawler:
 
         # Initialize the session before starting new requests
         if has_more and not self.verification_token:
-            if not self.initialize_session():
+            if not await self.initialize_session():
                 logger.error("Failed to initialize session, aborting crawl")
                 return all_results
 
@@ -284,7 +340,7 @@ class LegalOpinionsCrawler:
                 toDate=to_date,
             )
 
-            search_response = self.search(params)
+            search_response = await self.search(params)
 
             if not search_response:
                 logger.error(
@@ -304,7 +360,7 @@ class LegalOpinionsCrawler:
         logger.info(f"Crawling completed, collected {len(all_results)} total results")
         return all_results
 
-    def find_last_saved_page(
+    async def find_last_saved_page(
         self,
         search_text: str = "",
         page_size: int = 10,
@@ -335,12 +391,12 @@ class LegalOpinionsCrawler:
 
         # Find all matching files
         last_page = 0
-        output_dir = Path(project_configs.OUTPUT_PATH)
+        output_dir = AsyncPath(project_configs.OUTPUT_PATH)
 
-        if not output_dir.exists():
+        if not await output_dir.exists():
             return 0
 
-        for file_path in output_dir.glob(f"{pattern}*.json"):
+        for file_path in await output_dir.glob(f"{pattern}*.json"):
             try:
                 # Extract page number from filename
                 filename = file_path.name
